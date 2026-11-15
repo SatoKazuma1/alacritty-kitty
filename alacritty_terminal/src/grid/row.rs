@@ -22,6 +22,13 @@ pub struct Row<T> {
     /// This is the upper bound on the number of elements in the row, which have been modified
     /// since the last reset. All cells after this point are guaranteed to be equal.
     pub(crate) occ: usize,
+
+    /// Graphics anchor tag.
+    ///
+    /// Non-zero when graphics placements are anchored to this row. Since the row moves together
+    /// with its content, placements follow scrolling, history and reflow automatically.
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub(crate) graphics_tag: u64,
 }
 
 impl<T: PartialEq> PartialEq for Row<T> {
@@ -34,7 +41,7 @@ impl<T: Default> Row<T> {
     /// Create a new terminal row.
     pub fn new(columns: usize) -> Row<T> {
         let inner = iter::repeat_with(T::default).take(columns).collect();
-        Row { inner, occ: 0 }
+        Row { inner, occ: 0, graphics_tag: 0 }
     }
 
     /// Increase the number of columns in the row.
@@ -89,6 +96,7 @@ impl<T: Default> Row<T> {
         }
 
         self.occ = 0;
+        self.graphics_tag = 0;
     }
 }
 
@@ -96,12 +104,18 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ }
+        Row { inner: vec, occ, graphics_tag: 0 }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Graphics anchor tag of this row, zero if no graphics are anchored to it.
+    #[inline]
+    pub fn graphics_tag(&self) -> u64 {
+        self.graphics_tag
     }
 
     #[inline]

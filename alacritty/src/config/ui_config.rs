@@ -124,6 +124,8 @@ impl UiConfig {
             default_cursor_style: self.cursor.style(),
             osc52: self.terminal.osc52.0,
             kitty_keyboard: true,
+            kitty_graphics: self.terminal.kitty_graphics,
+            graphics_memory_limit: self.terminal.graphics_memory_limit as usize * 1024 * 1024,
         }
     }
 

@@ -14,6 +14,7 @@ use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
 use crate::event::{Event, EventListener};
+use crate::graphics::Graphics;
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
@@ -28,6 +29,7 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod kitty_graphics;
 pub mod search;
 
 /// Minimum number of columns.
@@ -327,6 +329,9 @@ pub struct Term<T> {
 
     /// Config directly for the terminal.
     config: Config,
+
+    /// Kitty graphics protocol images and placements.
+    graphics: Graphics,
 }
 
 /// Configuration options for the [`Term`].
@@ -351,6 +356,12 @@ pub struct Config {
 
     /// OSC52 support mode.
     pub osc52: Osc52,
+
+    /// Whether to enable the kitty graphics protocol.
+    pub kitty_graphics: bool,
+
+    /// Maximum memory used for kitty graphics image data, in bytes.
+    pub graphics_memory_limit: usize,
 }
 
 impl Default for Config {
@@ -362,6 +373,8 @@ impl Default for Config {
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
+            kitty_graphics: true,
+            graphics_memory_limit: crate::graphics::DEFAULT_MEMORY_LIMIT,
         }
     }
 }
@@ -422,7 +435,11 @@ impl<T> Term<T> {
         // Initialize terminal damage, covering the entire terminal upon launch.
         let damage = TermDamageState::new(num_cols, num_lines);
 
+        let mut graphics = Graphics::default();
+        graphics.memory_limit = config.graphics_memory_limit;
+
         Term {
+            graphics,
             inactive_grid,
             scroll_region,
             event_proxy,
@@ -513,6 +530,11 @@ impl<T> Term<T> {
             self.inactive_grid.update_history(self.config.scrolling_history);
         } else {
             self.grid.update_history(self.config.scrolling_history);
+        }
+
+        self.graphics.memory_limit = self.config.graphics_memory_limit;
+        if !self.config.kitty_graphics {
+            self.graphics.clear();
         }
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
@@ -1840,6 +1862,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.cursor_style = None;
         self.grid.reset();
         self.inactive_grid.reset();
+        self.graphics.clear();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
@@ -2262,6 +2285,18 @@ impl<T: EventListener> Handler for Term<T> {
             let width = window_size.num_cols * window_size.cell_width;
             format!("\x1b[4;{height};{width}t")
         })));
+    }
+
+    #[inline]
+    fn cell_size_pixels(&mut self) {
+        self.event_proxy.send_event(Event::TextAreaSizeRequest(Arc::new(move |window_size| {
+            format!("\x1b[6;{};{}t", window_size.cell_height, window_size.cell_width)
+        })));
+    }
+
+    #[inline]
+    fn kitty_graphics(&mut self, data: &[u8]) {
+        self.kitty_graphics_command(data);
     }
 
     #[inline]
