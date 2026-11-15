@@ -11,28 +11,19 @@ use std::sync::Arc;
 
 pub mod animation;
 pub mod command;
+pub mod data;
 pub mod diacritics;
 pub mod load;
 
 pub use animation::{Animation, AnimationState, Frame};
 pub use command::Command;
+pub use data::{DeltaOp, ImageData};
 
 /// Unicode placeholder character for virtual placements.
 pub const PLACEHOLDER: char = '\u{10EEEE}';
 
 /// Default memory limit for stored image data.
 pub const DEFAULT_MEMORY_LIMIT: usize = 320 * 1024 * 1024;
-
-/// Decoded image ready for upload to the GPU.
-#[derive(Debug)]
-pub struct ImageData {
-    /// Unique identifier for this image data, never reused.
-    pub uid: u64,
-    pub width: u32,
-    pub height: u32,
-    /// Non-premultiplied RGBA8 pixels.
-    pub pixels: Vec<u8>,
-}
 
 /// Rectangle in pixels.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -144,8 +135,9 @@ impl Image {
         self.frames[0].data.height
     }
 
-    fn memory(&self) -> usize {
-        self.frames.iter().map(|frame| frame.data.pixels.len()).sum()
+    /// Memory used by the image data in bytes.
+    pub fn memory(&self) -> usize {
+        self.frames.iter().map(|frame| frame.data.memory()).sum()
     }
 }
 
@@ -293,6 +285,13 @@ impl Graphics {
         self.enforce_memory_limit(index)
     }
 
+    /// Allocate a new unique image data id.
+    pub(crate) fn new_uid(&mut self) -> u64 {
+        let uid = self.next_uid;
+        self.next_uid += 1;
+        uid
+    }
+
     /// Wrap pixels into image data with a new unique id.
     pub(crate) fn image_data(
         &mut self,
@@ -302,7 +301,7 @@ impl Graphics {
     ) -> Arc<ImageData> {
         let uid = self.next_uid;
         self.next_uid += 1;
-        Arc::new(ImageData { uid, width, height, pixels })
+        Arc::new(ImageData::full(uid, width, height, pixels))
     }
 
     /// Evict old images until memory usage is below the limit.

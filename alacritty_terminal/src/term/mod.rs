@@ -1783,8 +1783,10 @@ impl<T: EventListener> Handler for Term<T> {
 
                 // If clearing more than one line.
                 if cursor.line > 1 {
-                    // Fully clear all lines before the current line.
+                    // Fully clear all lines before the current line, keeping graphics anchors.
+                    let tags = self.graphics_tags(0..cursor.line.0);
                     self.grid.reset_region(..cursor.line);
+                    self.restore_graphics_tags(tags);
                 }
 
                 // Clear up to the current column in the current line.
@@ -1803,13 +1805,19 @@ impl<T: EventListener> Handler for Term<T> {
                 }
 
                 if (cursor.line.0 as usize) < screen_lines - 1 {
+                    // Keep graphics anchors, like kitty images aren't affected by partial erases.
+                    let tags = self.graphics_tags(cursor.line.0 + 1..screen_lines as i32);
                     self.grid.reset_region((cursor.line + 1)..);
+                    self.restore_graphics_tags(tags);
                 }
 
                 let range = cursor.line..Line(screen_lines as i32);
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
             },
             ansi::ClearMode::All => {
+                // Delete all graphics visible on screen.
+                self.clear_graphics(false);
+
                 if self.mode.contains(TermMode::ALT_SCREEN) {
                     self.grid.reset_region(..);
                 } else {
@@ -1827,6 +1835,7 @@ impl<T: EventListener> Handler for Term<T> {
                 self.selection = None;
             },
             ansi::ClearMode::Saved if self.history_size() > 0 => {
+                self.clear_graphics(true);
                 self.grid.clear_history();
 
                 self.vi_mode_cursor.point.line =
@@ -1835,7 +1844,7 @@ impl<T: EventListener> Handler for Term<T> {
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(..Line(0)));
             },
             // We have no history to clear.
-            ansi::ClearMode::Saved => (),
+            ansi::ClearMode::Saved => self.clear_graphics(true),
         }
 
         self.mark_fully_damaged();

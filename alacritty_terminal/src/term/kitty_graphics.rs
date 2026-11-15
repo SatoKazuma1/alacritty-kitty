@@ -1,6 +1,7 @@
 //! Kitty graphics protocol integration with the terminal state.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use base64::Engine;
@@ -8,11 +9,11 @@ use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use log::debug;
 
 use crate::event::{Event, EventListener};
-use crate::graphics::animation::{self, Canvas, Composition, CompositionRect, Source};
+use crate::graphics::animation::{self, Composition};
 use crate::graphics::load::{self, Error};
 use crate::graphics::{
-    AnimationState, Command, Frame, Graphics, GraphicsDraw, PLACEHOLDER, Pending, Placement, Rect,
-    command, diacritics,
+    AnimationState, Command, DeltaOp, Frame, Graphics, GraphicsDraw, ImageData, PLACEHOLDER,
+    Pending, Placement, Rect, command, diacritics,
 };
 use crate::grid::{Dimensions, Grid};
 use crate::index::{Column, Line};
@@ -140,6 +141,12 @@ impl<T: EventListener> Term<T> {
             return;
         };
 
+        // Feature queries don't affect chunked transmissions in progress.
+        if cmd.action == b'q' && cmd.feature.is_some() {
+            self.respond_feature_query(&cmd);
+            return;
+        }
+
         // Continuation of a chunked transmission.
         if let Some(mut pending) = self.graphics.pending.take() {
             if pending.error.is_none() {
@@ -195,6 +202,10 @@ impl<T: EventListener> Term<T> {
                     },
                     None => self.respond(&cmd, Err(Error::new("ENOENT", "image not found"))),
                 }
+            },
+            b'd' if matches!(cmd.delete, b'f' | b'F') => {
+                let result = self.delete_frame(&cmd);
+                self.respond_errors(&cmd, result);
             },
             b'd' => self.delete(&cmd),
             b'a' => {
@@ -273,39 +284,34 @@ impl<T: EventListener> Term<T> {
         }
         let pixels = load::decode(&data_cmd, data)?;
 
-        let frame_pixels = |number: u32| -> Result<Vec<u8>, Error> {
+        let frame_data = |number: u32| -> Result<Arc<ImageData>, Error> {
             let frame = image.frames.get(number as usize - 1);
             frame
-                .map(|frame| frame.data.pixels.clone())
+                .map(|frame| frame.data.clone())
                 .ok_or_else(|| Error::new("ENOENT", format!("frame {number} not found")))
         };
 
         // Edit an existing frame, or create a new one on top of a base frame or color.
-        let (mut canvas, edit) = if cmd.rows != 0 {
-            (frame_pixels(cmd.rows)?, Some(cmd.rows as usize - 1))
+        let (base, edit) = if cmd.rows != 0 {
+            (Some(frame_data(cmd.rows)?), Some(cmd.rows as usize - 1))
         } else if cmd.columns != 0 {
-            (frame_pixels(cmd.columns)?, None)
+            (Some(frame_data(cmd.columns)?), None)
         } else {
-            (animation::filled(width, height, cmd.y_offset), None)
+            (None, None)
         };
 
+        // Frames only store the transmitted rectangle on top of their base.
         let mode = if cmd.x_offset == 1 { Composition::Overwrite } else { Composition::AlphaBlend };
-        let rect = CompositionRect {
-            src_x: 0,
-            src_y: 0,
-            dst_x: cmd.x,
-            dst_y: cmd.y,
+        let op = DeltaOp {
+            x: cmd.x,
+            y: cmd.y,
             width: pixels.width,
             height: pixels.height,
-        };
-        animation::compose(
-            &mut Canvas { width, height, pixels: &mut canvas },
-            &Source { width: pixels.width, height: pixels.height, pixels: &pixels.rgba },
-            rect,
+            pixels: pixels.rgba.into(),
             mode,
-        );
-
-        let data = self.graphics.image_data(width, height, canvas);
+        };
+        let uid = self.graphics.new_uid();
+        let data = Arc::new(ImageData::delta(uid, width, height, base, cmd.y_offset, op));
         let atime = self.graphics.tick();
         let image = &mut self.graphics.images[index];
         image.atime = atime;
@@ -406,18 +412,22 @@ impl<T: EventListener> Term<T> {
             return Err(Error::inval("source and destination rectangles overlap"));
         }
 
-        let mut canvas = image.frames[dst].data.pixels.clone();
+        // Copy the source rectangle and store it as a change to the destination frame.
+        let src_pixels = image.frames[src].data.pixels();
+        let mut rect = Vec::with_capacity(w as usize * h as usize * 4);
+        for row in src_y..src_y + h {
+            let start = (row as usize * width as usize + src_x as usize) * 4;
+            rect.extend_from_slice(&src_pixels[start..start + w as usize * 4]);
+        }
+
         let mode =
             if cmd.no_cursor_move { Composition::Overwrite } else { Composition::AlphaBlend };
-        animation::compose(
-            &mut Canvas { width, height, pixels: &mut canvas },
-            &Source { width, height, pixels: &image.frames[src].data.pixels },
-            CompositionRect { src_x, src_y, dst_x, dst_y, width: w, height: h },
-            mode,
-        );
-
-        let data = self.graphics.image_data(width, height, canvas);
+        let op = DeltaOp { x: dst_x, y: dst_y, width: w, height: h, pixels: rect.into(), mode };
+        let base = Some(image.frames[dst].data.clone());
+        let uid = self.graphics.new_uid();
+        let data = Arc::new(ImageData::delta(uid, width, height, base, 0, op));
         self.graphics.images[index].frames[dst].data = data;
+        self.graphics.enforce_memory_limit(index);
         self.mark_fully_damaged();
 
         Ok(())
@@ -533,14 +543,8 @@ impl<T: EventListener> Term<T> {
         let free = cmd.delete.is_ascii_uppercase();
         let what = cmd.delete.to_ascii_lowercase();
 
-        // Screen lines of all visible anchor tags.
-        let mut lines: HashMap<u64, i32> = HashMap::new();
-        for line in 0..self.screen_lines() as i32 {
-            let tag = self.grid[Line(line)].graphics_tag;
-            if tag != 0 {
-                lines.insert(tag, line);
-            }
-        }
+        // Lines of all anchor tags, including scrollback for partially visible placements.
+        let lines = self.anchor_lines();
 
         let (cell_width, cell_height) = (self.graphics.cell_width, self.graphics.cell_height);
         let cursor = self.grid.cursor.point;
@@ -574,7 +578,14 @@ impl<T: EventListener> Term<T> {
 
             image.placements.retain(|p| {
                 let delete = match what {
-                    b'a' => p.is_virtual || lines.contains_key(&p.tag),
+                    // Like kitty, delete non-virtual placements that are at least partially
+                    // visible.
+                    b'a' => {
+                        !p.is_virtual
+                            && lines.get(&p.tag).is_some_and(|&line| {
+                                line + p.size(cell_width, cell_height).rows as i32 > 0
+                            })
+                    },
                     b'i' | b'n' => cmd.placement_id == 0 || p.id == cmd.placement_id,
                     b'r' => true,
                     b'c' => covers(p, Some(cursor.column.0), Some(cursor.line.0)),
@@ -607,6 +618,59 @@ impl<T: EventListener> Term<T> {
         self.mark_fully_damaged();
     }
 
+    /// Line of every graphics anchor tag in the active grid, including scrollback.
+    fn anchor_lines(&self) -> HashMap<u64, i32> {
+        let mut lines = HashMap::new();
+        for line in self.grid.topmost_line().0..self.screen_lines() as i32 {
+            let tag = self.grid[Line(line)].graphics_tag;
+            if tag != 0 {
+                lines.insert(tag, line);
+            }
+        }
+        lines
+    }
+
+    /// Graphics anchor tags of the given screen lines.
+    pub(super) fn graphics_tags(&self, lines: std::ops::Range<i32>) -> Vec<(Line, u64)> {
+        lines
+            .map(Line)
+            .map(|line| (line, self.grid[line].graphics_tag))
+            .filter(|(_, tag)| *tag != 0)
+            .collect()
+    }
+
+    /// Restore graphics anchor tags removed by resetting rows.
+    pub(super) fn restore_graphics_tags(&mut self, tags: Vec<(Line, u64)>) {
+        for (line, tag) in tags {
+            self.grid[line].graphics_tag = tag;
+        }
+    }
+
+    /// Delete placements of the active screen like kitty's erase in display.
+    ///
+    /// With `all`, every non-virtual placement is deleted, otherwise only those at least
+    /// partially visible on screen.
+    pub(super) fn clear_graphics(&mut self, all: bool) {
+        if !self.graphics.has_placements() {
+            return;
+        }
+
+        let lines = self.anchor_lines();
+        let (cell_width, cell_height) = (self.graphics.cell_width, self.graphics.cell_height);
+        for image in &mut self.graphics.images {
+            image.placements.retain(|p| {
+                let Some(&line) = lines.get(&p.tag).filter(|_| !p.is_virtual) else {
+                    return true;
+                };
+                let visible = line + p.size(cell_width, cell_height).rows as i32 > 0;
+                !(all || visible)
+            });
+        }
+
+        self.graphics.remove_unreferenced_anonymous();
+        self.mark_fully_damaged();
+    }
+
     /// Remove placements whose anchor rows have been cleared or dropped from history.
     fn collect_garbage(&mut self) {
         let mut live = HashSet::new();
@@ -614,6 +678,53 @@ impl<T: EventListener> Term<T> {
         collect_tags(&self.inactive_grid, &mut live);
         self.graphics.retain_tags(&live);
         self.graphics.remove_unreferenced_anonymous();
+    }
+
+    /// Respond to a feature query (`a=q,e=<action>`).
+    fn respond_feature_query(&mut self, cmd: &Command) {
+        if (cmd.id == 0 && cmd.number == 0) || cmd.quiet >= 1 {
+            return;
+        }
+
+        let mut keys = Vec::new();
+        if cmd.id != 0 {
+            keys.push(format!("i={}", cmd.id));
+        }
+        if cmd.number != 0 {
+            keys.push(format!("I={}", cmd.number));
+        }
+        let features = cmd.supported_feature_keys();
+        if !features.is_empty() {
+            keys.push(features);
+        }
+
+        let text = format!("\x1b_G{};OK\x1b\\", keys.join(","));
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    /// Delete an animation frame (`a=d,d=f`).
+    fn delete_frame(&mut self, cmd: &Command) -> Result<(), Error> {
+        let index = self.command_image(cmd)?;
+        let image = &mut self.graphics.images[index];
+
+        if image.frames.len() == 1 {
+            // Deleting the last frame with `F` deletes the image.
+            if cmd.delete == b'F' {
+                self.graphics.images.remove(index);
+                self.mark_fully_damaged();
+            }
+            return Ok(());
+        }
+
+        let frame = (cmd.rows.max(1) as usize).min(image.frames.len()) - 1;
+        image.frames.remove(frame);
+        if image.current_frame > frame || image.current_frame >= image.frames.len() {
+            image.current_frame = image.current_frame.saturating_sub(1);
+        }
+        image.animation.shown_at = None;
+        self.mark_fully_damaged();
+
+        Ok(())
     }
 
     /// Send only error responses to the client.
@@ -1054,9 +1165,9 @@ mod tests {
 
         let image = &term.graphics.images[0];
         assert_eq!(image.frames.len(), 3);
-        assert_eq!(&image.frames[2].data.pixels[..8], &[0, 0, 255, 255, 0, 255, 0, 255]);
+        assert_eq!(&image.frames[2].data.pixels()[..8], &[0, 0, 255, 255, 0, 255, 0, 255]);
 
-        let pixel = |term: &Term<Responses>| term.graphics_frame()[0].image.pixels[..4].to_vec();
+        let pixel = |term: &Term<Responses>| term.graphics_frame()[0].image.pixels()[..4].to_vec();
         assert_eq!(pixel(&term), [255, 0, 0, 255]);
 
         let t0 = Instant::now();
@@ -1093,10 +1204,124 @@ mod tests {
         // Out of bounds.
         feed(&mut term, &mut parser, "\x1b_Ga=c,i=1,r=1,c=2,w=2,h=1,x=1\x1b\\");
 
-        let frame = &term.graphics.images[0].frames[1].data.pixels;
+        let frame = term.graphics.images[0].frames[1].data.pixels();
         assert_eq!(&frame[..], &[0, 0, 255, 255, 255, 0, 0, 255]);
         let responses = responses.0.lock().unwrap();
         assert_eq!(responses[0], "\x1b_Gi=1;OK\x1b\\");
         assert!(responses[1].starts_with("\x1b_Gi=1;EINVAL"));
+    }
+
+    #[test]
+    fn feature_query_keeps_chunked_transfer() {
+        let (mut term, mut parser, responses) = term();
+        let data = rgba(2, 2);
+        let (a, b) = data.split_at(8);
+        feed(&mut term, &mut parser, &format!("\x1b_Ga=t,i=9,s=2,v=2,q=1,m=1;{a}\x1b\\"));
+        feed(&mut term, &mut parser, "\x1b_Ga=q,i=31,e=T,U=1,C=1\x1b\\");
+        feed(&mut term, &mut parser, "\x1b_Ga=q,i=32,e=f,r=1,X=1\x1b\\");
+        feed(&mut term, &mut parser, &format!("\x1b_Gm=0;{b}\x1b\\"));
+
+        let responses = responses.0.lock().unwrap();
+        assert_eq!(responses.as_slice(), [
+            "\x1b_Gi=31,e=T,C=1,U=1;OK\x1b\\",
+            "\x1b_Gi=32,e=f,r=1,X=1;OK\x1b\\",
+        ]);
+        assert_eq!(term.graphics.images[0].width(), 2);
+    }
+
+    #[test]
+    fn erase_in_display_like_kitty() {
+        let (mut term, mut parser, _) = term();
+        let img = rgba(10, 20);
+
+        // Image on line 3, cursor moved above it: ED 0 keeps the image.
+        feed(&mut term, &mut parser, &format!("\x1b[4;1H\x1b_Ga=T,i=1,s=10,v=20,C=1;{img}\x1b\\"));
+        feed(&mut term, &mut parser, "\x1b[1;1H\x1b[J");
+        assert_eq!(term.graphics_frame().len(), 1);
+
+        // ED 1 above the image keeps it too.
+        feed(&mut term, &mut parser, "\x1b[10;1H\x1b[1J");
+        assert_eq!(term.graphics_frame().len(), 1);
+
+        // ED 2 deletes visible placements but keeps the image data.
+        feed(&mut term, &mut parser, "\x1b[2J");
+        assert!(term.graphics_frame().is_empty());
+        assert_eq!(term.graphics.images.len(), 1);
+
+        // ED 3 deletes placements in the scrollback as well.
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b[1;1H\x1b_Ga=p,i=1;\x1b\\{}", "\r\n".repeat(15)),
+        );
+        assert!(term.graphics_frame().is_empty());
+        assert_eq!(term.graphics.images[0].placements.len(), 1);
+        feed(&mut term, &mut parser, "\x1b[3J");
+        assert!(term.graphics.images[0].placements.is_empty());
+    }
+
+    #[test]
+    fn delete_frames() {
+        let (mut term, mut parser, _) = term();
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=t,f=24,i=1,s=1,v=1;{}\x1b\\", rgb(1, 1, [1, 1, 1])),
+        );
+        for color in [2, 3] {
+            feed(
+                &mut term,
+                &mut parser,
+                &format!("\x1b_Ga=f,f=24,i=1;{}\x1b\\", rgb(1, 1, [color; 3])),
+            );
+        }
+        assert_eq!(term.graphics.images[0].frames.len(), 3);
+
+        // Delete the second frame.
+        feed(&mut term, &mut parser, "\x1b_Ga=d,d=f,i=1,r=2\x1b\\");
+        let frames = &term.graphics.images[0].frames;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1].data.pixels()[0], 3);
+
+        // Deleting the root frame promotes the next one.
+        feed(&mut term, &mut parser, "\x1b_Ga=d,d=f,i=1\x1b\\");
+        assert_eq!(term.graphics.images[0].frames[0].data.pixels()[0], 3);
+
+        // `F` on the last frame deletes the image.
+        feed(&mut term, &mut parser, "\x1b_Ga=d,d=F,i=1\x1b\\");
+        assert!(term.graphics.images.is_empty());
+    }
+
+    #[test]
+    fn frames_store_only_changes() {
+        let (mut term, mut parser, _) = term();
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=t,f=24,i=1,s=100,v=100;{}\x1b\\", rgb(100, 100, [0, 0, 0])),
+        );
+        // Ten frames, each changing a 2x2 square on top of the previous frame.
+        for n in 0..10u32 {
+            let cmd = format!(
+                "\x1b_Ga=f,f=24,i=1,c={},x={},y={},s=2,v=2;{}\x1b\\",
+                n + 1,
+                n * 2,
+                n * 2,
+                rgb(2, 2, [255, 0, 0])
+            );
+            feed(&mut term, &mut parser, &cmd);
+        }
+
+        let image = &term.graphics.images[0];
+        assert_eq!(image.frames.len(), 11);
+        // Root frame plus ten 16 byte rectangles, instead of 11 full 40KB frames.
+        assert_eq!(image.memory(), 100 * 100 * 4 + 10 * 16);
+
+        // The last frame contains all squares.
+        let pixels = image.frames[10].data.pixels();
+        for n in 0..10usize {
+            let offset = ((n * 2) * 100 + n * 2) * 4;
+            assert_eq!(&pixels[offset..offset + 4], &[255, 0, 0, 255]);
+        }
     }
 }

@@ -50,6 +50,8 @@ pub struct Command {
     pub delete: u8,
     /// `U`: create a virtual placement for Unicode placeholders.
     pub virtual_placement: bool,
+    /// `e`: action whose support is checked by a feature query.
+    pub feature: Option<u8>,
 }
 
 impl Default for Command {
@@ -80,6 +82,7 @@ impl Default for Command {
             z: 0,
             delete: b'a',
             virtual_placement: false,
+            feature: None,
         }
     }
 }
@@ -109,6 +112,7 @@ pub fn parse(data: &[u8]) -> Option<(Command, &[u8])> {
             b'a' => cmd.action = char_value(value)?,
             b't' => cmd.medium = char_value(value)?,
             b'o' => cmd.compression = Some(char_value(value)?),
+            b'e' => cmd.feature = Some(char_value(value)?),
             b'd' => cmd.delete = char_value(value)?,
             b'q' => cmd.quiet = uint(value)?,
             b'f' => cmd.format = uint(value)?,
@@ -137,6 +141,124 @@ pub fn parse(data: &[u8]) -> Option<(Command, &[u8])> {
     }
 
     Some((cmd, payload))
+}
+
+impl Command {
+    /// Keys of a feature query (`a=q,e=<action>`) which are supported, as a response string.
+    ///
+    /// Mirrors kitty's behavior: only keys with non-default values are echoed, prefixed by
+    /// `e=<action>` if the action is supported at all.
+    pub fn supported_feature_keys(&self) -> String {
+        let Some(action) = self.feature.filter(|a| b"tTqpdfac".contains(a)) else {
+            return String::new();
+        };
+
+        let mut keys = vec![format!("e={}", action as char)];
+
+        match action {
+            b't' | b'T' | b'q' | b'f' => {
+                if self.medium != b'd' && b"fts".contains(&self.medium) {
+                    keys.push(format!("t={}", self.medium as char));
+                }
+                if self.compression == Some(b'z') {
+                    keys.push(String::from("o=z"));
+                }
+                if matches!(self.format, 24 | 100) {
+                    keys.push(format!("f={}", self.format));
+                }
+                if self.width <= super::load::MAX_IMAGE_DIMENSION {
+                    push_uint(&mut keys, 's', self.width);
+                }
+                if self.height <= super::load::MAX_IMAGE_DIMENSION {
+                    push_uint(&mut keys, 'v', self.height);
+                }
+                push_uint(&mut keys, 'S', self.size as u32);
+                push_uint(&mut keys, 'O', self.offset as u32);
+                if action == b'f' {
+                    push_uint(&mut keys, 'x', self.x);
+                    push_uint(&mut keys, 'y', self.y);
+                    push_uint(&mut keys, 'c', self.columns);
+                    push_uint(&mut keys, 'r', self.rows);
+                    if self.z != 0 {
+                        keys.push(format!("z={}", self.z));
+                    }
+                    if self.x_offset == 1 {
+                        keys.push(String::from("X=1"));
+                    }
+                    push_uint(&mut keys, 'Y', self.y_offset);
+                }
+                if action == b'T' {
+                    self.placement_keys(&mut keys);
+                }
+            },
+            b'p' => self.placement_keys(&mut keys),
+            b'd' => {
+                if self.delete != b'a' && b"aAiInNcCfFpPqQrRxXyYzZ".contains(&self.delete) {
+                    keys.push(format!("d={}", self.delete as char));
+                }
+                push_uint(&mut keys, 'p', self.placement_id);
+                push_uint(&mut keys, 'x', self.x);
+                push_uint(&mut keys, 'y', self.y);
+                if self.z != 0 {
+                    keys.push(format!("z={}", self.z));
+                }
+            },
+            b'a' => {
+                if self.width <= 3 {
+                    push_uint(&mut keys, 's', self.width);
+                }
+                push_uint(&mut keys, 'v', self.height);
+                push_uint(&mut keys, 'r', self.rows);
+                push_uint(&mut keys, 'c', self.columns);
+                if self.z != 0 {
+                    keys.push(format!("z={}", self.z));
+                }
+            },
+            b'c' => {
+                push_uint(&mut keys, 'r', self.rows);
+                push_uint(&mut keys, 'c', self.columns);
+                push_uint(&mut keys, 'x', self.x);
+                push_uint(&mut keys, 'y', self.y);
+                push_uint(&mut keys, 'w', self.w);
+                push_uint(&mut keys, 'h', self.h);
+                push_uint(&mut keys, 'X', self.x_offset);
+                push_uint(&mut keys, 'Y', self.y_offset);
+                if self.no_cursor_move {
+                    keys.push(String::from("C=1"));
+                }
+            },
+            _ => unreachable!(),
+        }
+
+        keys.join(",")
+    }
+
+    fn placement_keys(&self, keys: &mut Vec<String>) {
+        push_uint(keys, 'p', self.placement_id);
+        push_uint(keys, 'x', self.x);
+        push_uint(keys, 'y', self.y);
+        push_uint(keys, 'w', self.w);
+        push_uint(keys, 'h', self.h);
+        push_uint(keys, 'X', self.x_offset);
+        push_uint(keys, 'Y', self.y_offset);
+        push_uint(keys, 'c', self.columns);
+        push_uint(keys, 'r', self.rows);
+        if self.no_cursor_move {
+            keys.push(String::from("C=1"));
+        }
+        if self.virtual_placement {
+            keys.push(String::from("U=1"));
+        }
+        if self.z != 0 {
+            keys.push(format!("z={}", self.z));
+        }
+    }
+}
+
+fn push_uint(keys: &mut Vec<String>, key: char, value: u32) {
+    if value != 0 {
+        keys.push(format!("{key}={value}"));
+    }
 }
 
 fn char_value(value: &[u8]) -> Option<u8> {
@@ -177,6 +299,22 @@ mod tests {
         assert_eq!(cmd.medium, b'd');
         assert!(cmd.more);
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn feature_keys() {
+        let (cmd, _) = parse(b"a=q,i=31,e=T,U=1,C=1").unwrap();
+        assert_eq!(cmd.supported_feature_keys(), "e=T,C=1,U=1");
+
+        let (cmd, _) = parse(b"a=q,i=31,e=f,r=1,X=1").unwrap();
+        assert_eq!(cmd.supported_feature_keys(), "e=f,r=1,X=1");
+
+        // Relative placements are not supported.
+        let (cmd, _) = parse(b"a=q,i=31,e=p,P=3,Q=4").unwrap();
+        assert_eq!(cmd.supported_feature_keys(), "e=p");
+
+        let (cmd, _) = parse(b"a=q,i=31,e=Z").unwrap();
+        assert_eq!(cmd.supported_feature_keys(), "");
     }
 
     #[test]

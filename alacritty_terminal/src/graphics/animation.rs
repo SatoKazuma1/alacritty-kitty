@@ -211,12 +211,7 @@ mod tests {
         gaps.iter()
             .enumerate()
             .map(|(i, &gap)| Frame {
-                data: Arc::new(ImageData {
-                    uid: i as u64,
-                    width: 1,
-                    height: 1,
-                    pixels: vec![0; 4],
-                }),
+                data: Arc::new(ImageData::full(i as u64, 1, 1, vec![0; 4])),
                 gap,
             })
             .collect()

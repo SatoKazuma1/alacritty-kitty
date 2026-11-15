@@ -30,7 +30,7 @@ pub mod rects;
 mod shader;
 mod text;
 
-pub use text::{GlyphCache, LoaderApi};
+pub use text::{GlyphCache, LoaderApi, TextPasses};
 
 use shader::ShaderVersion;
 use text::{Gles2Renderer, Glsl3Renderer, TextRenderer};
@@ -193,6 +193,27 @@ impl Renderer {
             TextRendererProvider::Glsl3(renderer) => {
                 renderer.draw_cells(size_info, glyph_cache, cells)
             },
+        }
+    }
+
+    /// Draw only some passes of the cells, used to layer images between them.
+    pub fn draw_cells_passes<I: Iterator<Item = RenderableCell>>(
+        &mut self,
+        size_info: &SizeInfo,
+        glyph_cache: &mut GlyphCache,
+        cells: I,
+        passes: TextPasses,
+    ) {
+        match &mut self.text_renderer {
+            TextRendererProvider::Gles2(renderer) => renderer.passes = passes,
+            TextRendererProvider::Glsl3(renderer) => renderer.passes = passes,
+        }
+
+        self.draw_cells(size_info, glyph_cache, cells);
+
+        match &mut self.text_renderer {
+            TextRendererProvider::Gles2(renderer) => renderer.passes = TextPasses::All,
+            TextRendererProvider::Glsl3(renderer) => renderer.passes = TextPasses::All,
         }
     }
 

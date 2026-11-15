@@ -246,14 +246,17 @@ impl GraphicsRenderer {
             return texture.id;
         }
 
+        // Animation frames are only composed when they're uploaded.
+        let composed = image.pixels();
+
         let max = self.max_texture_size;
         let scaled;
         let (width, height, pixels) = if image.width > max || image.height > max {
             warn!("Downscaling {}x{} image to fit GPU texture limits", image.width, image.height);
-            scaled = downscale(image, max);
+            scaled = downscale(image, &composed, max);
             (scaled.0, scaled.1, &scaled.2[..])
         } else {
-            (image.width, image.height, &image.pixels[..])
+            (image.width, image.height, &composed[..])
         };
 
         let mut id: GLuint = 0;
@@ -302,7 +305,7 @@ impl Drop for GraphicsRenderer {
 }
 
 /// Nearest neighbor downscale of an image to fit into `max`x`max` pixels.
-fn downscale(image: &ImageData, max: u32) -> (u32, u32, Vec<u8>) {
+fn downscale(image: &ImageData, source: &[u8], max: u32) -> (u32, u32, Vec<u8>) {
     let scale = (max as f32 / image.width as f32).min(max as f32 / image.height as f32);
     let width = ((image.width as f32 * scale) as u32).clamp(1, max);
     let height = ((image.height as f32 * scale) as u32).clamp(1, max);
@@ -313,7 +316,7 @@ fn downscale(image: &ImageData, max: u32) -> (u32, u32, Vec<u8>) {
         for x in 0..width {
             let src_x = (x as u64 * image.width as u64 / width as u64) as usize;
             let offset = (src_y * image.width as usize + src_x) * 4;
-            pixels.extend_from_slice(&image.pixels[offset..offset + 4]);
+            pixels.extend_from_slice(&source[offset..offset + 4]);
         }
     }
 

@@ -27,6 +27,7 @@ use crossfont::{Rasterize, Rasterizer, Size as FontSize};
 use unicode_width::UnicodeWidthChar;
 
 use alacritty_terminal::event::{EventListener, OnResize, WindowSize};
+use alacritty_terminal::graphics::GraphicsDraw;
 use alacritty_terminal::grid::Dimensions as TermDimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point};
 use alacritty_terminal::selection::Selection;
@@ -53,7 +54,7 @@ use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
-use crate::renderer::{self, GlyphCache, Renderer, platform};
+use crate::renderer::{self, GlyphCache, Renderer, TextPasses, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::string::{ShortenDirection, StrShortener};
 
@@ -891,13 +892,31 @@ impl Display {
 
                 cell
             });
-            // Images with negative z-index are drawn below the text.
+            // Layer images like kitty: below cell backgrounds, between backgrounds and text,
+            // and above text.
+            const BELOW_BACKGROUND: i32 = -1_073_741_824;
             self.renderer.begin_graphics_frame();
-            self.renderer.draw_graphics(&size_info, graphics.iter().filter(|draw| draw.z < 0));
+            self.renderer
+                .draw_graphics(&size_info, graphics.iter().filter(|d| d.z < BELOW_BACKGROUND));
 
-            self.renderer.draw_cells(&size_info, glyph_cache, cells);
+            let below_text = |d: &&GraphicsDraw| (BELOW_BACKGROUND..0).contains(&d.z);
+            if graphics.iter().any(|d| below_text(&d)) {
+                let cells: Vec<_> = cells.collect();
+                let passes = TextPasses::Background;
+                self.renderer.draw_cells_passes(
+                    &size_info,
+                    glyph_cache,
+                    cells.iter().cloned(),
+                    passes,
+                );
+                self.renderer.draw_graphics(&size_info, graphics.iter().filter(below_text));
+                let passes = TextPasses::Glyphs;
+                self.renderer.draw_cells_passes(&size_info, glyph_cache, cells.into_iter(), passes);
+            } else {
+                self.renderer.draw_cells(&size_info, glyph_cache, cells);
+            }
 
-            self.renderer.draw_graphics(&size_info, graphics.iter().filter(|draw| draw.z >= 0));
+            self.renderer.draw_graphics(&size_info, graphics.iter().filter(|d| d.z >= 0));
         }
 
         let mut rects = lines.rects(&metrics, &size_info);

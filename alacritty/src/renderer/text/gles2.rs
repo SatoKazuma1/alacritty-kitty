@@ -15,7 +15,7 @@ use crate::renderer::{Error, GlExtensions};
 
 use super::atlas::{ATLAS_SIZE, Atlas};
 use super::{
-    Glyph, LoadGlyph, LoaderApi, RenderingGlyphFlags, RenderingPass, TextRenderApi,
+    Glyph, LoadGlyph, LoaderApi, RenderingGlyphFlags, RenderingPass, TextPasses, TextRenderApi,
     TextRenderBatch, TextRenderer, TextShader, glsl3,
 };
 
@@ -34,6 +34,7 @@ pub struct Gles2Renderer {
     current_atlas: usize,
     active_tex: GLuint,
     dual_source_blending: bool,
+    pub passes: TextPasses,
 }
 
 impl Gles2Renderer {
@@ -154,6 +155,7 @@ impl Gles2Renderer {
             current_atlas: 0,
             active_tex: 0,
             dual_source_blending,
+            passes: TextPasses::All,
         })
     }
 }
@@ -196,6 +198,7 @@ impl<'a> TextRenderer<'a> for Gles2Renderer {
             current_atlas: &mut self.current_atlas,
             program: &mut self.program,
             dual_source_blending: self.dual_source_blending,
+            passes: self.passes,
         });
 
         unsafe {
@@ -344,6 +347,7 @@ pub struct RenderApi<'a> {
     current_atlas: &'a mut usize,
     program: &'a mut TextShaderProgram,
     dual_source_blending: bool,
+    passes: TextPasses,
 }
 
 impl Drop for RenderApi<'_> {
@@ -393,9 +397,16 @@ impl TextRenderApi<Batch> for RenderApi<'_> {
             // https://github.com/servo/webrender/blob/master/webrender/doc/text-rendering.md.
 
             // Draw background.
-            self.program.set_rendering_pass(RenderingPass::Background);
-            gl::BlendFunc(gl::ONE, gl::ZERO);
-            gl::DrawElements(gl::TRIANGLES, num_indices, gl::UNSIGNED_SHORT, ptr::null());
+            if self.passes != TextPasses::Glyphs {
+                self.program.set_rendering_pass(RenderingPass::Background);
+                gl::BlendFunc(gl::ONE, gl::ZERO);
+                gl::DrawElements(gl::TRIANGLES, num_indices, gl::UNSIGNED_SHORT, ptr::null());
+            }
+
+            if self.passes == TextPasses::Background {
+                self.batch.clear();
+                return;
+            }
 
             self.program.set_rendering_pass(RenderingPass::SubpixelPass1);
             if self.dual_source_blending {

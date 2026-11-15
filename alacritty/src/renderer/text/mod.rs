@@ -16,6 +16,18 @@ pub mod glyph_cache;
 
 use atlas::Atlas;
 pub use gles2::Gles2Renderer;
+
+/// Which parts of the cells the text renderer draws.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TextPasses {
+    /// Cell backgrounds and glyphs.
+    #[default]
+    All,
+    /// Only cell backgrounds.
+    Background,
+    /// Only glyphs.
+    Glyphs,
+}
 pub use glsl3::Glsl3Renderer;
 pub use glyph_cache::GlyphCache;
 use glyph_cache::{Glyph, LoadGlyph};

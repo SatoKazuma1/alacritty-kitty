@@ -15,7 +15,7 @@ use crate::renderer::shader::{ShaderProgram, ShaderVersion};
 
 use super::atlas::{ATLAS_SIZE, Atlas};
 use super::{
-    Glyph, LoadGlyph, LoaderApi, RenderingGlyphFlags, RenderingPass, TextRenderApi,
+    Glyph, LoadGlyph, LoaderApi, RenderingGlyphFlags, RenderingPass, TextPasses, TextRenderApi,
     TextRenderBatch, TextRenderer, TextShader,
 };
 
@@ -36,6 +36,7 @@ pub struct Glsl3Renderer {
     current_atlas: usize,
     active_tex: GLuint,
     batch: Batch,
+    pub passes: TextPasses,
 }
 
 impl Glsl3Renderer {
@@ -141,6 +142,7 @@ impl Glsl3Renderer {
             current_atlas: 0,
             active_tex: 0,
             batch: Batch::new(),
+            passes: TextPasses::All,
         })
     }
 }
@@ -170,6 +172,7 @@ impl<'a> TextRenderer<'a> for Glsl3Renderer {
             atlas: &mut self.atlas,
             current_atlas: &mut self.current_atlas,
             program: &mut self.program,
+            passes: self.passes,
         });
 
         unsafe {
@@ -213,6 +216,7 @@ pub struct RenderApi<'a> {
     atlas: &'a mut Vec<Atlas>,
     current_atlas: &'a mut usize,
     program: &'a mut TextShaderProgram,
+    passes: TextPasses,
 }
 
 impl TextRenderApi<Batch> for RenderApi<'_> {
@@ -239,22 +243,26 @@ impl TextRenderApi<Batch> for RenderApi<'_> {
         }
 
         unsafe {
-            self.program.set_rendering_pass(RenderingPass::Background);
-            gl::DrawElementsInstanced(
-                gl::TRIANGLES,
-                6,
-                gl::UNSIGNED_INT,
-                ptr::null(),
-                self.batch.len() as GLsizei,
-            );
-            self.program.set_rendering_pass(RenderingPass::SubpixelPass1);
-            gl::DrawElementsInstanced(
-                gl::TRIANGLES,
-                6,
-                gl::UNSIGNED_INT,
-                ptr::null(),
-                self.batch.len() as GLsizei,
-            );
+            if self.passes != TextPasses::Glyphs {
+                self.program.set_rendering_pass(RenderingPass::Background);
+                gl::DrawElementsInstanced(
+                    gl::TRIANGLES,
+                    6,
+                    gl::UNSIGNED_INT,
+                    ptr::null(),
+                    self.batch.len() as GLsizei,
+                );
+            }
+            if self.passes != TextPasses::Background {
+                self.program.set_rendering_pass(RenderingPass::SubpixelPass1);
+                gl::DrawElementsInstanced(
+                    gl::TRIANGLES,
+                    6,
+                    gl::UNSIGNED_INT,
+                    ptr::null(),
+                    self.batch.len() as GLsizei,
+                );
+            }
         }
 
         self.batch.clear();
