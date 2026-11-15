@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+TryExec=alacritty-kitty
+Exec=alacritty-kitty --class alacritty-kitty
+Icon=alacritty-kitty
+Terminal=false
+Categories=System;TerminalEmulator;
+
+Name=Alacritty Kitty
+GenericName=Terminal
+Comment=Alacritty with kitty graphics protocol support
+Keywords=shell;prompt;command;commandline;cmd;images;kitty;
+StartupNotify=true
+StartupWMClass=alacritty-kitty
+Actions=New;
+X-TerminalArgExec=-e
+X-TerminalArgAppId=--class
+X-TerminalArgTitle=--title
+X-TerminalArgDir=--working-directory
+
+[Desktop Action New]
+Name=New Terminal
+Exec=alacritty-kitty --class alacritty-kitty

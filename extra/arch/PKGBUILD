@@ -1,0 +1,62 @@
+# Maintainer: SatoKazuma1 <109879498+SatoKazuma1@users.noreply.github.com>
+
+pkgname=alacritty-kitty-git
+_pkgname=alacritty-kitty
+pkgver=0.17.0.r0.g0000000
+pkgrel=1
+pkgdesc="Alacritty fork with kitty graphics protocol support (images, animations, Unicode placeholders)"
+arch=(x86_64 aarch64)
+url="https://github.com/SatoKazuma1/alacritty-kitty"
+license=(Apache-2.0 MIT)
+depends=(freetype2 fontconfig libxi libxcursor libxkbcommon libxkbcommon-x11 libxrandr gcc-libs glibc)
+makedepends=(cargo git cmake scdoc)
+source=("$_pkgname::git+$url.git#branch=kitty-graphics")
+sha256sums=(SKIP)
+
+pkgver() {
+  cd "$_pkgname"
+  local version
+  version=$(sed -n 's/^version = "\([0-9.]*\).*"/\1/p' alacritty/Cargo.toml | head -1)
+  printf "%s.r%s.g%s" "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+
+  for page in alacritty.1 alacritty-msg.1 alacritty.5 alacritty-bindings.5; do
+    scdoc < "extra/man/$page.scd" > "${page/alacritty/alacritty-kitty}"
+  done
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release -p alacritty_terminal
+}
+
+package() {
+  cd "$_pkgname"
+
+  install -Dm755 target/release/alacritty "$pkgdir/usr/bin/alacritty-kitty"
+  install -Dm644 extra/linux/alacritty-kitty.desktop "$pkgdir/usr/share/applications/alacritty-kitty.desktop"
+  install -Dm644 extra/logo/alacritty-kitty.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/alacritty-kitty.svg"
+
+  for page in alacritty-kitty.1 alacritty-kitty-msg.1; do
+    install -Dm644 "$page" "$pkgdir/usr/share/man/man1/$page"
+  done
+  for page in alacritty-kitty.5 alacritty-kitty-bindings.5; do
+    install -Dm644 "$page" "$pkgdir/usr/share/man/man5/$page"
+  done
+
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+}
