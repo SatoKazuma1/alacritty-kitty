@@ -53,7 +53,7 @@ text and stay in the scrollback.
 | tmux | With `allow-passthrough on`, through Unicode placeholders |
 
 Tested on Arch Linux (CachyOS), KDE Plasma on Wayland with an NVIDIA GPU.
-macOS and Windows builds are untested.
+macOS and Windows builds pass CI, but haven't been tested by hand.
 
 ### Not supported
 

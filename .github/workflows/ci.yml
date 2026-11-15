@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -26,3 +26,20 @@ jobs:
           cargo clippy --all-targets
       - name: Man pages
         run: for page in extra/man/*.scd; do scdoc < "$page" > /dev/null; done
+
+  # Cross-platform builds are tested by CI only, the maintainer uses Linux.
+  other:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test
+        run: cargo test --workspace
+      - name: Clippy
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets
