@@ -277,6 +277,28 @@ impl<T: EventListener> Term<T> {
         let size = placement.size(self.graphics.cell_width, self.graphics.cell_height);
         let is_virtual = placement.is_virtual;
 
+        // Anonymous images can't be referenced by the client anymore, so a new anonymous
+        // placement exactly covering an older one replaces it. Without this, players like
+        // `mpv --vo=kitty`, which send every frame as a new anonymous image, would pile up
+        // hundreds of stacked frames.
+        let (cell_width, cell_height) = (self.graphics.cell_width, self.graphics.cell_height);
+        if self.graphics.images[index].id == 0 && !placement.is_virtual {
+            for (i, other) in self.graphics.images.iter_mut().enumerate() {
+                if i == index || other.id != 0 || other.number != 0 {
+                    continue;
+                }
+                other.placements.retain(|p| {
+                    let covered = p.tag == placement.tag
+                        && p.column == placement.column
+                        && p.x_offset == placement.x_offset
+                        && p.y_offset == placement.y_offset
+                        && p.z == placement.z
+                        && p.size(cell_width, cell_height) == size;
+                    !covered
+                });
+            }
+        }
+
         let image = &mut self.graphics.images[index];
         image.atime = atime;
         if placement.id != 0 {
@@ -773,5 +795,20 @@ mod tests {
         assert_eq!(responses.len(), 4);
         assert_eq!(responses[0], "\x1b_Gi=1;OK\x1b\\");
         assert_eq!(responses[3], "\x1b[?62;22c");
+    }
+
+    #[test]
+    fn anonymous_frames_replace_each_other() {
+        let (mut term, mut parser, _) = term();
+        let frame = format!(
+            "\x1b[1;1H\x1b_Ga=T,f=24,s=10,v=20,C=1,q=2;{}\x1b\\",
+            STANDARD.encode([0u8; 600])
+        );
+        for _ in 0..5 {
+            feed(&mut term, &mut parser, &frame);
+        }
+
+        assert_eq!(term.graphics.images.len(), 1);
+        assert_eq!(term.graphics_frame().len(), 1);
     }
 }
