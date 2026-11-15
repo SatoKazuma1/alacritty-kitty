@@ -1,3 +1,11 @@
+> **Note:** this is **Alacritty Kitty**, an unofficial fork of Alacritty that adds
+> the kitty graphics protocol. Issues and pull requests for the fork belong in
+> [this repository](https://github.com/SatoKazuma1/alacritty-kitty/issues), not
+> in the Alacritty issue tracker. The fork was developed with the help of an AI
+> coding assistant, so none of its code may be contributed to upstream Alacritty,
+> whose policy below forbids LLM generated contributions. The rest of this
+> document is the upstream contribution guide.
+
 # Contributing to Alacritty
 
 Thank you for your interest in contributing to Alacritty!

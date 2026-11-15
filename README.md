@@ -1,46 +1,121 @@
 <p align="center">
-    <img width="200" alt="Alacritty Logo" src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/logo/compat/alacritty-term%2Bscanlines.png">
+    <img width="160" alt="Alacritty Kitty logo" src="extra/logo/alacritty-kitty.svg">
 </p>
 
-<h1 align="center">Alacritty - A fast, cross-platform, OpenGL terminal emulator</h1>
+<h1 align="center">Alacritty Kitty</h1>
 
 <p align="center">
-  <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"
-       src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">
+  An unofficial fork of <a href="https://github.com/alacritty/alacritty">Alacritty</a>
+  with support for the <a href="https://sw.kovidgoyal.net/kitty/graphics-protocol/">kitty graphics protocol</a>:
+  images, animations and Unicode placeholders right in your terminal.
 </p>
 
-## About this fork
+> [!IMPORTANT]
+> This is **not** the official Alacritty and is not affiliated with or endorsed by
+> the Alacritty project. Please report bugs of this fork
+> [here](https://github.com/SatoKazuma1/alacritty-kitty/issues), not to Alacritty.
+>
+> The fork was developed with the help of an AI coding assistant (Claude) and
+> tested by its maintainer on Linux. Upstream Alacritty doesn't accept LLM
+> generated code, so none of these changes will be submitted upstream.
 
-This fork adds support for the [kitty graphics protocol] to Alacritty, so
-tools like `kitten icat`, `yazi`, `ranger`, `timg`, `chafa` and image plugins
-for Neovim can display images directly in the terminal.
+## Features
 
-Supported:
+Everything Alacritty does, plus the kitty graphics protocol:
 
-- Transmission: direct (chunked), file, temporary file and shared memory
-- Formats: RGB, RGBA and PNG, with optional zlib compression
-- Placements with source rectangles, cell sizes (`c`/`r`), pixel offsets and
-  z-index (negative z-index is drawn below the text)
-- Unicode placeholders (`U=1`), which makes images work inside tmux with
+- **Transmission**: direct (chunked), file, temporary file and shared memory;
+  RGB, RGBA and PNG data with optional zlib compression
+- **Placements**: source rectangles, sizes in cells, pixel offsets, z-index in
+  kitty's three layers (below cell backgrounds, below text, above text)
+- **Unicode placeholders** (`U=1`), so images work inside tmux with
   `set -g allow-passthrough on`
-- Deletion with all selectors, queries (`a=q`) and responses honoring `q=`
-- Animation: frame loading (`a=f`, partial frames, base frames, background
-  color, blend/overwrite), terminal driven playback with gaps, loops and
-  loading mode (`a=a`) and frame composition (`a=c`)
+- **Animation**: frame loading, editing and composition, terminal driven
+  playback with gaps, loop counts and loading mode; frames are stored as deltas
+- **Deletion** with all selectors, **queries** including feature queries
+  (`e=`), responses honoring `q=`
+- Erase in display behaves like kitty: `clear` removes visible images, partial
+  erases keep them
 - `CSI 16 t` cell size reports
 
-Not supported: relative placements.
+Images are anchored to the line they were placed on, so they scroll with the
+text and stay in the scrollback.
 
-Images are anchored to the row they were placed on, so they move with the text
-when scrolling and through scrollback. Configuration (`[terminal]` section):
+### Tested with
+
+| Application | Notes |
+|---|---|
+| `kitten icat` | All transfer modes, animated GIFs |
+| `chafa -f kitty` | Including animated GIFs |
+| [yazi](https://github.com/sxyazi/yazi) | Image, PDF and video previews |
+| [tdf](https://github.com/itsjunetime/tdf) | PDF viewer |
+| `mpv --vo=kitty` | Video playback at full frame rate |
+| `fastfetch` | `kitty` and `kitty-icat` logos (animated with `kitty-icat`) |
+| tmux | With `allow-passthrough on`, through Unicode placeholders |
+
+Tested on Arch Linux (CachyOS), KDE Plasma on Wayland with an NVIDIA GPU.
+macOS and Windows builds are untested.
+
+### Not supported
+
+- Relative placements (`P`, `Q`, `H`, `V` keys)
+- Indexed color images (`f=8`, `f=16`, added in kitty 0.50)
+- Images aren't reflowed when the window width changes, like in kitty
+
+## Installation
+
+### Arch Linux
+
+```sh
+git clone https://github.com/SatoKazuma1/alacritty-kitty
+cd alacritty-kitty/extra/arch
+makepkg -si
+```
+
+This installs `alacritty-kitty` next to an existing Alacritty, with its own
+desktop entry, icon and man pages (`man alacritty-kitty`).
+
+### From source
+
+Install the [build dependencies of Alacritty](INSTALL.md#dependencies), then:
+
+```sh
+cargo build --release
+./target/release/alacritty
+```
+
+## Configuration
+
+Alacritty Kitty reads the regular Alacritty configuration file. The graphics
+protocol is enabled by default and can be configured in the `[terminal]`
+section:
 
 ```toml
 [terminal]
-kitty_graphics = true          # enable the protocol
-graphics_memory_limit = 320    # MiB of image data before eviction
+kitty_graphics = true          # Enable the kitty graphics protocol
+graphics_memory_limit = 320    # MiB of image data before old images are evicted
 ```
 
-[kitty graphics protocol]: https://sw.kovidgoyal.net/kitty/graphics-protocol/
+## Branches
+
+- `kitty-graphics`: the fork (default branch)
+- `master`: mirror of upstream Alacritty
+
+The protocol is implemented in `alacritty_terminal/src/graphics` and
+`alacritty_terminal/src/term/kitty_graphics.rs`, rendering in
+`alacritty/src/renderer/graphics.rs`. A patched copy of
+[vte](https://github.com/alacritty/vte) in `vendor/vte` adds APC sequence
+support.
+
+## License
+
+Alacritty Kitty is released under the [Apache License, Version 2.0], like
+Alacritty. The vendored vte crate is licensed under Apache-2.0 or MIT.
+
+---
+
+# Alacritty
+
+The rest of this document is the upstream Alacritty README.
 
 ## About
 
