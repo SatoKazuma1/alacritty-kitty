@@ -1280,7 +1280,9 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?6c");
+                // VT220 with ANSI color. Some clients (e.g. `kitten icat`) ignore the shorter
+                // VT102 `CSI ? 6 c` response, which makes them wait for a timeout.
+                let text = String::from("\x1b[?62;22c");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             },
             Some('>') => {

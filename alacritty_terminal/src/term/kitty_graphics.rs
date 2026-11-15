@@ -756,4 +756,22 @@ mod tests {
         assert_eq!(frame[1].line, 1);
         assert_eq!(frame[1].source, [0., 20., 20., 20.]);
     }
+
+    #[test]
+    fn icat_detection_queries() {
+        let (mut term, mut parser, responses) = term();
+        feed(
+            &mut term,
+            &mut parser,
+            "\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S=47,i=2;\
+             L2Rldi9zaG0va2l0dHktdHR5LWdyYXBoaWNzLXByb3RvY29sLTMwMzkwMDYwNzk\x1b\\\x1b_Ga=q,f=24,\
+             t=s,s=1,v=1,S=19,i=3;L2ljYXQtN0E1VTNFWExMUjRGNA\x1b\\\x1b[c",
+        );
+
+        // `kitten icat` only accepts DA1 responses with more than 3 characters.
+        let responses = responses.0.lock().unwrap();
+        assert_eq!(responses.len(), 4);
+        assert_eq!(responses[0], "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(responses[3], "\x1b[?62;22c");
+    }
 }
