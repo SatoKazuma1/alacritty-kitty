@@ -625,6 +625,19 @@ Windows: _"powershell"_
 
 	Default: _"OnlyCopy"_
 
+*kitty_graphics* = _true_ | _false_
+
+	Enable the kitty graphics protocol for displaying images in the terminal.
+
+	Default: _true_
+
+*graphics_memory_limit* = _<integer>_
+
+	Maximum amount of memory in MiB used for image data of the kitty graphics
+	protocol. When exceeded, the least recently used images are evicted.
+
+	Default: _320_
+
 # MOUSE
 
 This section documents the *[mouse]* table of the configuration file.

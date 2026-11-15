@@ -792,6 +792,12 @@ impl Display {
         let display_offset = content.display_offset();
         let cursor = content.cursor();
 
+        // Collect kitty graphics images, sorted by z-index.
+        terminal
+            .set_cell_size(self.size_info.cell_width() as u32, self.size_info.cell_height() as u32);
+        let mut graphics = terminal.graphics_frame();
+        graphics.sort_by_key(|draw| draw.z);
+
         let cursor_point = terminal.grid().cursor.point;
         let total_lines = terminal.grid().total_lines();
         let metrics = self.glyph_cache.font_metrics();
@@ -875,7 +881,13 @@ impl Display {
 
                 cell
             });
+            // Images with negative z-index are drawn below the text.
+            self.renderer.begin_graphics_frame();
+            self.renderer.draw_graphics(&size_info, graphics.iter().filter(|draw| draw.z < 0));
+
             self.renderer.draw_cells(&size_info, glyph_cache, cells);
+
+            self.renderer.draw_graphics(&size_info, graphics.iter().filter(|draw| draw.z >= 0));
         }
 
         let mut rects = lines.rects(&metrics, &size_info);

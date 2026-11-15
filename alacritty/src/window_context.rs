@@ -190,7 +190,12 @@ impl WindowContext {
         // This object contains all of the state about what's being displayed. It's
         // wrapped in a clonable mutex since both the I/O loop and display need to
         // access it.
-        let terminal = Term::new(config.term_options(), &display.size_info, event_proxy.clone());
+        let mut terminal =
+            Term::new(config.term_options(), &display.size_info, event_proxy.clone());
+        terminal.set_cell_size(
+            display.size_info.cell_width() as u32,
+            display.size_info.cell_height() as u32,
+        );
         let terminal = Arc::new(FairMutex::new(terminal));
 
         // Create the PTY.

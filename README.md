@@ -9,6 +9,36 @@
        src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">
 </p>
 
+## About this fork
+
+This fork adds support for the [kitty graphics protocol] to Alacritty, so
+tools like `kitten icat`, `yazi`, `ranger`, `timg`, `chafa` and image plugins
+for Neovim can display images directly in the terminal.
+
+Supported:
+
+- Transmission: direct (chunked), file, temporary file and shared memory
+- Formats: RGB, RGBA and PNG, with optional zlib compression
+- Placements with source rectangles, cell sizes (`c`/`r`), pixel offsets and
+  z-index (negative z-index is drawn below the text)
+- Unicode placeholders (`U=1`), which makes images work inside tmux with
+  `set -g allow-passthrough on`
+- Deletion with all selectors, queries (`a=q`) and responses honoring `q=`
+- `CSI 16 t` cell size reports
+
+Not supported: animation and relative placements.
+
+Images are anchored to the row they were placed on, so they move with the text
+when scrolling and through scrollback. Configuration (`[terminal]` section):
+
+```toml
+[terminal]
+kitty_graphics = true          # enable the protocol
+graphics_memory_limit = 320    # MiB of image data before eviction
+```
+
+[kitty graphics protocol]: https://sw.kovidgoyal.net/kitty/graphics-protocol/
+
 ## About
 
 Alacritty is a modern terminal emulator that comes with sensible defaults, but

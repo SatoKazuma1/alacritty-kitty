@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::{cmp, mem};
 
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::graphics::PLACEHOLDER;
 use alacritty_terminal::grid::{Dimensions, Indexed};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
@@ -285,7 +286,13 @@ impl RenderableCell {
             .underline_color()
             .map_or(fg, |underline| Self::compute_fg_rgb(content, underline, flags));
 
-        let zerowidth = cell.zerowidth();
+        // Kitty graphics Unicode placeholders are drawn as images, not glyphs.
+        let is_placeholder = character == PLACEHOLDER;
+        if is_placeholder {
+            character = ' ';
+        }
+
+        let zerowidth = cell.zerowidth().filter(|_| !is_placeholder);
         let hyperlink = cell.hyperlink();
 
         let extra = (zerowidth.is_some() || hyperlink.is_some()).then(|| {

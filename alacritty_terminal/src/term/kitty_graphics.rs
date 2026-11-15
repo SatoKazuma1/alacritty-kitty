@@ -357,7 +357,10 @@ impl<T: EventListener> Term<T> {
                     b'c' => covers(p, Some(cursor.column.0), Some(cursor.line.0)),
                     b'p' => cell_x.is_some() && cell_y.is_some() && covers(p, cell_x, cell_y),
                     b'q' => {
-                        cell_x.is_some() && cell_y.is_some() && covers(p, cell_x, cell_y) && p.z == cmd.z
+                        cell_x.is_some()
+                            && cell_y.is_some()
+                            && covers(p, cell_x, cell_y)
+                            && p.z == cmd.z
                     },
                     b'x' => cell_x.is_some() && covers(p, cell_x, None),
                     b'y' => cell_y.is_some() && covers(p, None, cell_y),
@@ -512,9 +515,10 @@ impl<T: EventListener> Term<T> {
     ) {
         let Some(index) = self.graphics.image_index(cell.image_id()) else { return };
         let image = &self.graphics.images[index];
-        let placement = image.placements.iter().find(|p| {
-            p.is_virtual && (cell.placement_id == 0 || p.id == cell.placement_id)
-        });
+        let placement = image
+            .placements
+            .iter()
+            .find(|p| p.is_virtual && (cell.placement_id == 0 || p.id == cell.placement_id));
         let Some(placement) = placement else { return };
 
         let (cw, ch) = (self.graphics.cell_width as f32, self.graphics.cell_height as f32);
@@ -731,7 +735,11 @@ mod tests {
     fn unicode_placeholders() {
         let (mut term, mut parser, _) = term();
         // 20x40 px image over 2x2 cells.
-        feed(&mut term, &mut parser, &format!("\x1b_Ga=T,U=1,i=42,c=2,r=2,s=20,v=40;{}\x1b\\", rgba(20, 40)));
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=T,U=1,i=42,c=2,r=2,s=20,v=40;{}\x1b\\", rgba(20, 40)),
+        );
         assert!(term.graphics_frame().is_empty());
 
         // Image id 42 in the foreground color, row/column diacritics.

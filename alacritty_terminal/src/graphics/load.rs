@@ -228,8 +228,7 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), Error> {
 fn decode_png(data: &[u8]) -> Result<Pixels, Error> {
     let mut decoder = png::Decoder::new(data);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader =
-        decoder.read_info().map_err(|err| Error::new("EBADPNG", format!("{err}")))?;
+    let mut reader = decoder.read_info().map_err(|err| Error::new("EBADPNG", format!("{err}")))?;
 
     let (width, height) = {
         let info = reader.info();
@@ -238,7 +237,8 @@ fn decode_png(data: &[u8]) -> Result<Pixels, Error> {
     check_dimensions(width, height)?;
 
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|err| Error::new("EBADPNG", format!("{err}")))?;
+    let info =
+        reader.next_frame(&mut buf).map_err(|err| Error::new("EBADPNG", format!("{err}")))?;
     buf.truncate(info.buffer_size());
 
     let pixels = width as usize * height as usize;

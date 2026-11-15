@@ -20,9 +20,11 @@ use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
+use crate::renderer::graphics::GraphicsRenderer;
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
 
+mod graphics;
 pub mod platform;
 pub mod rects;
 mod shader;
@@ -89,6 +91,7 @@ enum TextRendererProvider {
 pub struct Renderer {
     text_renderer: TextRendererProvider,
     rect_renderer: RectRenderer,
+    graphics_renderer: GraphicsRenderer,
     robustness: bool,
 }
 
@@ -150,6 +153,9 @@ impl Renderer {
             None => (shader_version.as_ref() >= "3.3" && !is_gles_context, true),
         };
 
+        let shader_version = if use_glsl3 { ShaderVersion::Glsl3 } else { ShaderVersion::Gles2 };
+        let graphics_renderer = GraphicsRenderer::new(shader_version)?;
+
         let (text_renderer, rect_renderer) = if use_glsl3 {
             let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
             let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
@@ -171,7 +177,7 @@ impl Renderer {
             }
         }
 
-        Ok(Self { text_renderer, rect_renderer, robustness })
+        Ok(Self { text_renderer, rect_renderer, graphics_renderer, robustness })
     }
 
     pub fn draw_cells<I: Iterator<Item = RenderableCell>>(
@@ -237,6 +243,21 @@ impl Renderer {
             TextRendererProvider::Gles2(renderer) => renderer.with_loader(func),
             TextRendererProvider::Glsl3(renderer) => renderer.with_loader(func),
         }
+    }
+
+    /// Start a new frame for image rendering.
+    pub fn begin_graphics_frame(&mut self) {
+        self.graphics_renderer.begin_frame();
+    }
+
+    /// Draw kitty graphics images.
+    pub fn draw_graphics<'a>(
+        &mut self,
+        size_info: &SizeInfo,
+        draws: impl Iterator<Item = &'a alacritty_terminal::graphics::GraphicsDraw>,
+    ) {
+        self.graphics_renderer.draw(size_info, draws);
+        self.set_viewport(size_info);
     }
 
     /// Draw all rectangles simultaneously to prevent excessive program swaps.
