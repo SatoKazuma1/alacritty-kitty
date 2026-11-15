@@ -1,15 +1,18 @@
 //! Kitty graphics protocol integration with the terminal state.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use log::debug;
 
 use crate::event::{Event, EventListener};
+use crate::graphics::animation::{self, Canvas, Composition, CompositionRect, Source};
 use crate::graphics::load::{self, Error};
 use crate::graphics::{
-    Command, Graphics, GraphicsDraw, PLACEHOLDER, Pending, Placement, Rect, command, diacritics,
+    AnimationState, Command, Frame, Graphics, GraphicsDraw, PLACEHOLDER, Pending, Placement, Rect,
+    command, diacritics,
 };
 use crate::grid::{Dimensions, Grid};
 use crate::index::{Column, Line};
@@ -164,7 +167,7 @@ impl<T: EventListener> Term<T> {
         }
 
         match cmd.action {
-            b't' | b'T' | b'q' => {
+            b't' | b'T' | b'q' | b'f' => {
                 let mut data = Vec::new();
                 let error = decode_base64_into(payload, &mut data).err();
 
@@ -194,8 +197,13 @@ impl<T: EventListener> Term<T> {
                 }
             },
             b'd' => self.delete(&cmd),
-            b'f' | b'a' | b'c' => {
-                self.respond(&cmd, Err(Error::inval("animation is not supported")));
+            b'a' => {
+                let result = self.control_animation(&cmd);
+                self.respond_errors(&cmd, result);
+            },
+            b'c' => {
+                let result = self.compose_frames(&cmd);
+                self.respond(&cmd, result);
             },
             _ => self.respond(&cmd, Err(Error::inval("unknown action"))),
         }
@@ -203,9 +211,15 @@ impl<T: EventListener> Term<T> {
 
     /// Process a fully received transmission.
     fn finish_transmission(&mut self, mut cmd: Command, data: Vec<u8>) {
-        let result = load::read_medium(&cmd, data)
-            .and_then(|data| load::decompress(&cmd, data))
-            .and_then(|data| load::decode(&cmd, data));
+        let raw = load::read_medium(&cmd, data).and_then(|data| load::decompress(&cmd, data));
+
+        if cmd.action == b'f' {
+            let result = raw.and_then(|data| self.add_frame(&cmd, data));
+            self.respond(&cmd, result);
+            return;
+        }
+
+        let result = raw.and_then(|data| load::decode(&cmd, data));
 
         let pixels = match result {
             Ok(pixels) => pixels,
@@ -233,11 +247,198 @@ impl<T: EventListener> Term<T> {
         self.respond(&cmd, result);
     }
 
+    /// Find the image referenced by a command.
+    fn command_image(&self, cmd: &Command) -> Result<usize, Error> {
+        self.graphics
+            .image_index(cmd.id)
+            .or_else(|| self.graphics.image_index_by_number(cmd.number))
+            .ok_or_else(|| Error::new("ENOENT", "image not found"))
+    }
+
+    /// Add or edit an animation frame (`a=f`).
+    fn add_frame(&mut self, cmd: &Command, data: Vec<u8>) -> Result<(), Error> {
+        let index = self.command_image(cmd)?;
+        let image = &self.graphics.images[index];
+        let (width, height) = (image.width(), image.height());
+
+        // Raw data covers the rest of the image unless its size is given.
+        let mut data_cmd = cmd.clone();
+        if data_cmd.format != 100 {
+            if data_cmd.width == 0 {
+                data_cmd.width = width.saturating_sub(cmd.x);
+            }
+            if data_cmd.height == 0 {
+                data_cmd.height = height.saturating_sub(cmd.y);
+            }
+        }
+        let pixels = load::decode(&data_cmd, data)?;
+
+        let frame_pixels = |number: u32| -> Result<Vec<u8>, Error> {
+            let frame = image.frames.get(number as usize - 1);
+            frame
+                .map(|frame| frame.data.pixels.clone())
+                .ok_or_else(|| Error::new("ENOENT", format!("frame {number} not found")))
+        };
+
+        // Edit an existing frame, or create a new one on top of a base frame or color.
+        let (mut canvas, edit) = if cmd.rows != 0 {
+            (frame_pixels(cmd.rows)?, Some(cmd.rows as usize - 1))
+        } else if cmd.columns != 0 {
+            (frame_pixels(cmd.columns)?, None)
+        } else {
+            (animation::filled(width, height, cmd.y_offset), None)
+        };
+
+        let mode = if cmd.x_offset == 1 { Composition::Overwrite } else { Composition::AlphaBlend };
+        let rect = CompositionRect {
+            src_x: 0,
+            src_y: 0,
+            dst_x: cmd.x,
+            dst_y: cmd.y,
+            width: pixels.width,
+            height: pixels.height,
+        };
+        animation::compose(
+            &mut Canvas { width, height, pixels: &mut canvas },
+            &Source { width: pixels.width, height: pixels.height, pixels: &pixels.rgba },
+            rect,
+            mode,
+        );
+
+        let data = self.graphics.image_data(width, height, canvas);
+        let atime = self.graphics.tick();
+        let image = &mut self.graphics.images[index];
+        image.atime = atime;
+        match edit {
+            Some(i) => {
+                image.frames[i].data = data;
+                if cmd.z != 0 {
+                    image.frames[i].gap = cmd.z;
+                }
+            },
+            None => {
+                let gap = if cmd.z != 0 { cmd.z } else { animation::DEFAULT_GAP };
+                image.frames.push(Frame { data, gap });
+            },
+        }
+
+        self.graphics.enforce_memory_limit(index);
+        self.mark_fully_damaged();
+
+        Ok(())
+    }
+
+    /// Control animation playback (`a=a`).
+    fn control_animation(&mut self, cmd: &Command) -> Result<(), Error> {
+        let index = self.command_image(cmd)?;
+        let image = &mut self.graphics.images[index];
+
+        // Gap of a specific frame.
+        if cmd.rows != 0 && cmd.z != 0 {
+            let frame = image.frames.get_mut(cmd.rows as usize - 1);
+            let frame = frame.ok_or_else(|| Error::new("ENOENT", "frame not found"))?;
+            frame.gap = cmd.z;
+        }
+
+        // Current frame.
+        if cmd.columns != 0 {
+            let frame = cmd.columns as usize - 1;
+            if frame >= image.frames.len() {
+                return Err(Error::new("ENOENT", "frame not found"));
+            }
+            image.current_frame = frame;
+            image.animation.shown_at = None;
+        }
+
+        // Number of loops.
+        if cmd.height != 0 {
+            image.animation.loops = cmd.height;
+        }
+
+        let animation = &mut image.animation;
+        match cmd.width {
+            1 => {
+                animation.state = AnimationState::Stopped;
+                animation.loops_done = 0;
+                animation.shown_at = None;
+            },
+            2 | 3 => {
+                if animation.state == AnimationState::Stopped {
+                    animation.shown_at = None;
+                }
+                animation.state =
+                    if cmd.width == 2 { AnimationState::Loading } else { AnimationState::Running };
+            },
+            _ => (),
+        }
+
+        self.mark_fully_damaged();
+
+        Ok(())
+    }
+
+    /// Compose a rectangle from one frame onto another (`a=c`).
+    fn compose_frames(&mut self, cmd: &Command) -> Result<(), Error> {
+        let index = self.command_image(cmd)?;
+        let image = &self.graphics.images[index];
+        let (width, height) = (image.width(), image.height());
+
+        let src = cmd.rows.max(1) as usize - 1;
+        let dst = cmd.columns.max(1) as usize - 1;
+        if src >= image.frames.len() || dst >= image.frames.len() {
+            return Err(Error::new("ENOENT", "frame not found"));
+        }
+
+        let w = if cmd.w == 0 { width } else { cmd.w };
+        let h = if cmd.h == 0 { height } else { cmd.h };
+        let (src_x, src_y, dst_x, dst_y) = (cmd.x_offset, cmd.y_offset, cmd.x, cmd.y);
+        let out_of_bounds = |x: u32, y: u32| {
+            x.checked_add(w).is_none_or(|end| end > width)
+                || y.checked_add(h).is_none_or(|end| end > height)
+        };
+        if out_of_bounds(src_x, src_y) || out_of_bounds(dst_x, dst_y) {
+            return Err(Error::inval("rectangle out of bounds"));
+        }
+
+        let overlaps =
+            src_x < dst_x + w && dst_x < src_x + w && src_y < dst_y + h && dst_y < src_y + h;
+        if src == dst && overlaps {
+            return Err(Error::inval("source and destination rectangles overlap"));
+        }
+
+        let mut canvas = image.frames[dst].data.pixels.clone();
+        let mode =
+            if cmd.no_cursor_move { Composition::Overwrite } else { Composition::AlphaBlend };
+        animation::compose(
+            &mut Canvas { width, height, pixels: &mut canvas },
+            &Source { width, height, pixels: &image.frames[src].data.pixels },
+            CompositionRect { src_x, src_y, dst_x, dst_y, width: w, height: h },
+            mode,
+        );
+
+        let data = self.graphics.image_data(width, height, canvas);
+        self.graphics.images[index].frames[dst].data = data;
+        self.mark_fully_damaged();
+
+        Ok(())
+    }
+
+    /// Advance running animations.
+    ///
+    /// Returns when the next animation frame is due.
+    pub fn advance_animations(&mut self, now: Instant) -> Option<Instant> {
+        let (changed, next) = self.graphics.advance_animations(now);
+        if changed {
+            self.mark_fully_damaged();
+        }
+        next
+    }
+
     /// Create a placement for the image at `index`.
     fn place(&mut self, index: usize, cmd: &Command) -> Result<(), Error> {
         let atime = self.graphics.tick();
         let image = &self.graphics.images[index];
-        let (width, height) = (image.data.width, image.data.height);
+        let (width, height) = (image.width(), image.height());
 
         let x = cmd.x.min(width);
         let y = cmd.y.min(height);
@@ -415,6 +616,13 @@ impl<T: EventListener> Term<T> {
         self.graphics.remove_unreferenced_anonymous();
     }
 
+    /// Send only error responses to the client.
+    fn respond_errors(&mut self, cmd: &Command, result: Result<(), Error>) {
+        if result.is_err() {
+            self.respond(cmd, result);
+        }
+    }
+
     /// Send a response to the client.
     fn respond(&mut self, cmd: &Command, result: Result<(), Error>) {
         if cmd.id == 0 && cmd.number == 0 {
@@ -483,7 +691,7 @@ impl<T: EventListener> Term<T> {
                     let source = placement.source;
 
                     draws.push(GraphicsDraw {
-                        image: image.data.clone(),
+                        image: image.data().clone(),
                         line: line + display_offset,
                         column: placement.column,
                         x: placement.x_offset as f32,
@@ -579,7 +787,7 @@ impl<T: EventListener> Term<T> {
         if let Some(last) = draws.last_mut() {
             let last_end = last.column as f32 * cw + last.x + last.width;
             let start = column as f32 * cw + (x0 - cell_x);
-            let contiguous = last.image.uid == image.data.uid
+            let contiguous = last.image.uid == image.data().uid
                 && last.line == line
                 && last.z == placement.z
                 && (last_end - start).abs() < 0.01
@@ -594,7 +802,7 @@ impl<T: EventListener> Term<T> {
         }
 
         draws.push(GraphicsDraw {
-            image: image.data.clone(),
+            image: image.data().clone(),
             line,
             column,
             x: x0 - cell_x,
@@ -684,7 +892,7 @@ mod tests {
 
         assert!(responses.0.lock().unwrap().is_empty());
         assert_eq!(term.graphics.images.len(), 1);
-        assert_eq!(term.graphics.images[0].data.width, 4);
+        assert_eq!(term.graphics.images[0].width(), 4);
         assert!(term.graphics.images[0].placements.is_empty());
     }
 
@@ -810,5 +1018,85 @@ mod tests {
 
         assert_eq!(term.graphics.images.len(), 1);
         assert_eq!(term.graphics_frame().len(), 1);
+    }
+
+    /// Solid RGB frame data as base64.
+    fn rgb(w: usize, h: usize, color: [u8; 3]) -> String {
+        STANDARD.encode(color.repeat(w * h))
+    }
+
+    #[test]
+    fn animation_like_icat() {
+        use std::time::{Duration, Instant};
+
+        let (mut term, mut parser, responses) = term();
+        // Root frame, then gap and loops for it, then two frames and start playback.
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=T,f=24,i=5,s=2,v=2,q=2;{}\x1b\\", rgb(2, 2, [255, 0, 0])),
+        );
+        feed(&mut term, &mut parser, "\x1b_Ga=a,i=5,r=1,z=100,q=2\x1b\\");
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=f,f=24,i=5,z=100,X=1,q=2;{}\x1b\\", rgb(2, 2, [0, 255, 0])),
+        );
+        feed(&mut term, &mut parser, "\x1b_Ga=a,i=5,s=2,q=2\x1b\\");
+        // Partial frame on top of frame 2: only the top-left pixel becomes blue.
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=f,f=24,i=5,c=2,s=1,v=1,z=100,q=2;{}\x1b\\", rgb(1, 1, [0, 0, 255])),
+        );
+        feed(&mut term, &mut parser, "\x1b_Ga=a,i=5,s=3,q=2\x1b\\");
+        assert!(responses.0.lock().unwrap().is_empty());
+
+        let image = &term.graphics.images[0];
+        assert_eq!(image.frames.len(), 3);
+        assert_eq!(&image.frames[2].data.pixels[..8], &[0, 0, 255, 255, 0, 255, 0, 255]);
+
+        let pixel = |term: &Term<Responses>| term.graphics_frame()[0].image.pixels[..4].to_vec();
+        assert_eq!(pixel(&term), [255, 0, 0, 255]);
+
+        let t0 = Instant::now();
+        let next = term.advance_animations(t0);
+        assert_eq!(next, Some(t0 + Duration::from_millis(100)));
+        term.advance_animations(t0 + Duration::from_millis(110));
+        assert_eq!(pixel(&term), [0, 255, 0, 255]);
+        term.advance_animations(t0 + Duration::from_millis(210));
+        assert_eq!(pixel(&term), [0, 0, 255, 255]);
+        term.advance_animations(t0 + Duration::from_millis(310));
+        assert_eq!(pixel(&term), [255, 0, 0, 255]);
+
+        // Client driven: stop and jump to frame 2.
+        feed(&mut term, &mut parser, "\x1b_Ga=a,i=5,s=1,c=2\x1b\\");
+        assert_eq!(term.advance_animations(t0 + Duration::from_secs(5)), None);
+        assert_eq!(pixel(&term), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn compose_frames() {
+        let (mut term, mut parser, responses) = term();
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=t,f=24,i=1,s=2,v=1,q=2;{}\x1b\\", rgb(2, 1, [255, 0, 0])),
+        );
+        feed(
+            &mut term,
+            &mut parser,
+            &format!("\x1b_Ga=f,f=24,i=1,q=2;{}\x1b\\", rgb(2, 1, [0, 0, 255])),
+        );
+        // Copy the left pixel of frame 1 onto the right pixel of frame 2.
+        feed(&mut term, &mut parser, "\x1b_Ga=c,i=1,r=1,c=2,w=1,h=1,X=0,Y=0,x=1,y=0,C=1\x1b\\");
+        // Out of bounds.
+        feed(&mut term, &mut parser, "\x1b_Ga=c,i=1,r=1,c=2,w=2,h=1,x=1\x1b\\");
+
+        let frame = &term.graphics.images[0].frames[1].data.pixels;
+        assert_eq!(&frame[..], &[0, 0, 255, 255, 255, 0, 0, 255]);
+        let responses = responses.0.lock().unwrap();
+        assert_eq!(responses[0], "\x1b_Gi=1;OK\x1b\\");
+        assert!(responses[1].starts_with("\x1b_Gi=1;EINVAL"));
     }
 }

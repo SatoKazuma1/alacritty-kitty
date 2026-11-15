@@ -556,6 +556,8 @@ pub enum EventType {
     #[cfg(unix)]
     Shutdown,
     Frame,
+    /// Kitty graphics animation frame is due.
+    Animation,
 }
 
 impl From<TerminalEvent> for EventType {
@@ -1842,6 +1844,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
         match event {
             WinitEvent::UserEvent(Event { payload, .. }) => match payload {
                 EventType::SearchNext => self.ctx.goto_match(None),
+                EventType::Animation => *self.ctx.dirty = true,
                 EventType::Scroll(scroll) => self.ctx.scroll(scroll),
                 EventType::BlinkCursor => {
                     // Only change state when timeout isn't reached, since we could get

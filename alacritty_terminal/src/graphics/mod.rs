@@ -9,10 +9,12 @@
 
 use std::sync::Arc;
 
+pub mod animation;
 pub mod command;
 pub mod diacritics;
 pub mod load;
 
+pub use animation::{Animation, AnimationState, Frame};
 pub use command::Command;
 
 /// Unicode placeholder character for virtual placements.
@@ -116,15 +118,34 @@ pub struct Image {
     pub id: u32,
     /// Client assigned number.
     pub number: u32,
-    pub data: Arc<ImageData>,
+    /// Animation frames; the first one is the root frame.
+    pub frames: Vec<Frame>,
+    /// Index of the currently displayed frame.
+    pub current_frame: usize,
+    pub animation: Animation,
     pub placements: Vec<Placement>,
     /// Last access time, used for eviction.
     pub(crate) atime: u64,
 }
 
 impl Image {
+    /// Pixels of the currently displayed frame.
+    pub fn data(&self) -> &Arc<ImageData> {
+        &self.frames[self.current_frame.min(self.frames.len() - 1)].data
+    }
+
+    /// Image width in pixels.
+    pub fn width(&self) -> u32 {
+        self.frames[0].data.width
+    }
+
+    /// Image height in pixels.
+    pub fn height(&self) -> u32 {
+        self.frames[0].data.height
+    }
+
     fn memory(&self) -> usize {
-        self.data.pixels.len()
+        self.frames.iter().map(|frame| frame.data.pixels.len()).sum()
     }
 }
 
@@ -256,28 +277,38 @@ impl Graphics {
             self.images.remove(index);
         }
 
-        let data = Arc::new(ImageData {
-            uid: self.next_uid,
-            width: pixels.width,
-            height: pixels.height,
-            pixels: pixels.rgba,
-        });
-        self.next_uid += 1;
-
+        let data = self.image_data(pixels.width, pixels.height, pixels.rgba);
         let atime = self.tick();
-        self.images.push(Image { id, number, data, placements: Vec::new(), atime });
+        self.images.push(Image {
+            id,
+            number,
+            frames: vec![Frame { data, gap: 0 }],
+            current_frame: 0,
+            animation: Animation::default(),
+            placements: Vec::new(),
+            atime,
+        });
         let index = self.images.len() - 1;
 
-        self.enforce_memory_limit(index);
+        self.enforce_memory_limit(index)
+    }
 
-        // The new image is never evicted, but indices may have shifted.
-        self.images.iter().position(|image| image.atime == atime).unwrap_or(0)
+    /// Wrap pixels into image data with a new unique id.
+    pub(crate) fn image_data(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Arc<ImageData> {
+        let uid = self.next_uid;
+        self.next_uid += 1;
+        Arc::new(ImageData { uid, width, height, pixels })
     }
 
     /// Evict old images until memory usage is below the limit.
     ///
-    /// The image at `keep` is never evicted.
-    fn enforce_memory_limit(&mut self, keep: usize) {
+    /// The image at `keep` is never evicted. Returns the new index of that image.
+    pub(crate) fn enforce_memory_limit(&mut self, keep: usize) -> usize {
         let keep_atime = self.images[keep].atime;
         let mut used: usize = self.images.iter().map(Image::memory).sum();
 
@@ -296,6 +327,39 @@ impl Graphics {
                 None => break,
             }
         }
+
+        self.images.iter().position(|image| image.atime == keep_atime).unwrap_or(0)
+    }
+
+    /// Advance all running animations.
+    ///
+    /// Returns whether any displayed frame changed and when the next frame is due.
+    pub fn advance_animations(
+        &mut self,
+        now: std::time::Instant,
+    ) -> (bool, Option<std::time::Instant>) {
+        let mut changed = false;
+        let mut next: Option<std::time::Instant> = None;
+
+        for image in &mut self.images {
+            // Only animate images which are displayed somewhere.
+            if image.placements.is_empty() {
+                continue;
+            }
+
+            let (frame_changed, deadline) = animation::advance(
+                &mut image.animation,
+                &image.frames,
+                &mut image.current_frame,
+                now,
+            );
+            changed |= frame_changed;
+            if let Some(deadline) = deadline {
+                next = Some(next.map_or(deadline, |next| next.min(deadline)));
+            }
+        }
+
+        (changed, next)
     }
 
     /// Remove placements whose anchor rows no longer exist.

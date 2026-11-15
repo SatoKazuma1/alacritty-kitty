@@ -795,6 +795,7 @@ impl Display {
         // Collect kitty graphics images, sorted by z-index.
         terminal
             .set_cell_size(self.size_info.cell_width() as u32, self.size_info.cell_height() as u32);
+        let next_animation_frame = terminal.advance_animations(Instant::now());
         let mut graphics = terminal.graphics_frame();
         graphics.sort_by_key(|draw| draw.z);
 
@@ -819,6 +820,15 @@ impl Display {
 
         // Drop terminal as early as possible to free lock.
         drop(terminal);
+
+        // Schedule a redraw for the next kitty graphics animation frame.
+        let animation_timer = TimerId::new(Topic::Animation, self.window.id());
+        scheduler.unschedule(animation_timer);
+        if let Some(deadline) = next_animation_frame {
+            let event = Event::new(EventType::Animation, self.window.id());
+            let delay = deadline.saturating_duration_since(Instant::now());
+            scheduler.schedule(event, delay, false, animation_timer);
+        }
 
         // Invalidate highlighted hints if grid has changed.
         self.validate_hint_highlights(display_offset);

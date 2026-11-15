@@ -24,9 +24,12 @@ Supported:
 - Unicode placeholders (`U=1`), which makes images work inside tmux with
   `set -g allow-passthrough on`
 - Deletion with all selectors, queries (`a=q`) and responses honoring `q=`
+- Animation: frame loading (`a=f`, partial frames, base frames, background
+  color, blend/overwrite), terminal driven playback with gaps, loops and
+  loading mode (`a=a`) and frame composition (`a=c`)
 - `CSI 16 t` cell size reports
 
-Not supported: animation and relative placements.
+Not supported: relative placements.
 
 Images are anchored to the row they were placed on, so they move with the text
 when scrolling and through scrollback. Configuration (`[terminal]` section):
